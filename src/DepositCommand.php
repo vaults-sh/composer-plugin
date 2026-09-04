@@ -19,18 +19,17 @@ use Vaults\Exception\VaultsException;
 use Vaults\Project\ProjectManifest;
 use Vaults\Project\ProjectName;
 use Vaults\Result\Project;
+use Vaults\Support\NativeSleeper;
+use Vaults\Support\Sleeper;
 use Vaults\VaultsClient;
 
-final class ProtectCommand extends BaseCommand
+final class DepositCommand extends BaseCommand
 {
-    /**
-     * @param  (callable(int): void)|null  $sleep
-     */
     public function __construct(
         private ?VaultsClient $client = null,
         private ?TokenStore $store = null,
         private ?string $workingDirectory = null,
-        private $sleep = null,
+        private ?Sleeper $sleeper = null,
         private ?IOInterface $io = null,
     ) {
         parent::__construct();
@@ -43,9 +42,9 @@ final class ProtectCommand extends BaseCommand
 
     protected function configure(): void
     {
-        $this->setName('protect')
-            ->setDescription('Protect the dependencies in composer.lock with Vaults')
-            ->addOption('check', null, InputOption::VALUE_NONE, 'Report protection status without starting a run')
+        $this->setName('deposit')
+            ->setDescription('Deposit the dependencies in composer.lock with Vaults')
+            ->addOption('check', null, InputOption::VALUE_NONE, 'Report deposit status without starting a run')
             ->addOption('write', null, InputOption::VALUE_NONE, 'Overwrite composer.lock with the rewritten Vaults version')
             ->addOption('project', null, InputOption::VALUE_REQUIRED, 'Project UUID (overrides .vaults.json)');
     }
@@ -69,7 +68,7 @@ final class ProtectCommand extends BaseCommand
         }
 
         if ($token === null) {
-            $output->writeln('<error>Not authenticated. Run "composer protect" in an interactive terminal to log in, or set the VAULTS_TOKEN environment variable.</error>');
+            $output->writeln('<error>Not authenticated. Run "composer deposit" in an interactive terminal to log in, or set the VAULTS_TOKEN environment variable.</error>');
 
             return self::FAILURE;
         }
@@ -104,7 +103,7 @@ final class ProtectCommand extends BaseCommand
                 return $this->check($client, $projectUuid, $lock, $output);
             }
 
-            return $this->protect($client, $projectUuid, $lock, $lockPath, (bool) $input->getOption('write'), $output, $directory, $input->isInteractive());
+            return $this->deposit($client, $projectUuid, $lock, $lockPath, (bool) $input->getOption('write'), $output, $directory, $input->isInteractive());
         } catch (AuthenticationException) {
             $output->writeln('<error>Your Vaults token was rejected. Run "vaults login" again.</error>');
 
@@ -177,7 +176,7 @@ final class ProtectCommand extends BaseCommand
     private function deviceLogin(TokenStore $store, OutputInterface $output): ?string
     {
         $client = $this->client ?? new VaultsClient;
-        $flow = new DeviceFlow($client);
+        $flow = new DeviceFlow($client, $this->sleeper ?? new NativeSleeper);
 
         try {
             $pair = $flow->start((string) (gethostname() ?: 'composer-plugin'));
@@ -191,7 +190,7 @@ final class ProtectCommand extends BaseCommand
         $output->writeln('Then approve it at: <info>'.$pair->verificationUriComplete.'</info>');
         $output->writeln('Waiting for approval...');
 
-        $result = $flow->await($pair, sleep: $this->sleep);
+        $result = $flow->await($pair);
 
         if ($result->isDenied()) {
             $output->writeln('<error>This sign-in was denied in the browser. Nothing was saved.</error>');
@@ -213,50 +212,50 @@ final class ProtectCommand extends BaseCommand
 
     private function check(VaultsClient $client, string $projectUuid, string $lock, OutputInterface $output): int
     {
-        $result = $client->protectCheck($projectUuid, $lock);
+        $result = $client->depositCheck($projectUuid, $lock);
 
         foreach ($result->packages as $package) {
             $output->writeln(sprintf(
                 '  %s %s %s%s',
-                $package->protected ? '<fg=green>✓</>' : '<fg=red>✗</>',
+                $package->deposited ? '<fg=green>✓</>' : '<fg=red>✗</>',
                 $package->name,
                 $package->version,
                 $package->securityStatus !== null && $package->securityStatus !== 'clear' ? ' <comment>['.$package->securityStatus.']</comment>' : '',
             ));
         }
 
-        $output->writeln($result->protected.'/'.$result->total.' protected, '.$result->unprotected.' unprotected.');
+        $output->writeln($result->deposited.'/'.$result->total.' deposited, '.$result->undeposited.' undeposited.');
 
-        if (! $result->isFullyProtected()) {
-            $output->writeln('<comment>Run "composer protect" to protect the remaining packages.</comment>');
+        if (! $result->isFullyDeposited()) {
+            $output->writeln('<comment>Run "composer deposit" to deposit the remaining packages.</comment>');
 
             return self::FAILURE;
         }
 
-        $output->writeln('<info>All packages are protected.</info>');
+        $output->writeln('<info>All packages are deposited.</info>');
 
         return self::SUCCESS;
     }
 
-    private function protect(VaultsClient $client, string $projectUuid, string $lock, string $lockPath, bool $write, OutputInterface $output, string $directory, bool $interactive): int
+    private function deposit(VaultsClient $client, string $projectUuid, string $lock, string $lockPath, bool $write, OutputInterface $output, string $directory, bool $interactive): int
     {
-        $run = $client->protect($projectUuid, $lock);
+        $run = $client->deposit($projectUuid, $lock);
 
-        $output->writeln('Protection run started.');
+        $output->writeln('Deposit run started.');
 
         while (! $run->isFinished()) {
-            ($this->sleep ?? static fn (int $seconds) => sleep($seconds))(2);
+            ($this->sleeper ?? new NativeSleeper)->sleep(2);
 
             $run = $client->getRun($run->uuid);
 
-            $output->write("\r".'Protected '.$run->packagesProtected.'/'.$run->packagesTotal.'...');
+            $output->write("\r".'Deposited '.$run->packagesDeposited.'/'.$run->packagesTotal.'...');
         }
 
         $output->writeln('');
-        $output->writeln('Protected: '.$run->packagesProtected.' · Skipped: '.$run->packagesSkipped.' · Failed: '.$run->packagesFailed);
+        $output->writeln('Deposited: '.$run->packagesDeposited.' · Skipped: '.$run->packagesSkipped.' · Failed: '.$run->packagesFailed);
 
         if ($run->status !== 'completed') {
-            $output->writeln('<error>The protection run failed. See the Vaults dashboard for details.</error>');
+            $output->writeln('<error>The deposit run failed. See the Vaults dashboard for details.</error>');
 
             return self::FAILURE;
         }
@@ -269,7 +268,7 @@ final class ProtectCommand extends BaseCommand
             file_put_contents($lockPath, $this->withRefreshedContentHash($rewritten->composerLock, $directory));
             $output->writeln('<info>composer.lock rewritten to install from Vaults. Run composer install.</info>');
         } else {
-            $output->writeln('Run "composer protect --write" to rewrite composer.lock, then "composer install".');
+            $output->writeln('Run "composer deposit --write" to rewrite composer.lock, then "composer install".');
         }
 
         return self::SUCCESS;
