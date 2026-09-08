@@ -23,7 +23,7 @@
   "require": {
     "php": ">=8.2",
     "composer-plugin-api": "^2.3",
-    "vaults/php-client": "0.0.3"
+    "vaults/php-client": "0.0.4"
   },
   "require-dev": {
     "composer/composer": "^2.7",
